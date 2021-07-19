@@ -41,11 +41,19 @@ static const char *x509_sigs[] = {
 	NULL
 };
 
+static const char *ssh_verify_args[] = { NULL };
+static const char *ssh_sigs[] = {
+	"-----BEGIN SSH SIGNATURE-----",
+	NULL
+};
+
 static int verify_gpg_signed_buffer(struct signature_check *sigc,
 				    struct gpg_format *fmt, const char *payload,
 				    size_t payload_size, const char *signature,
 				    size_t signature_size);
 static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
+			   const char *signing_key);
+static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
 
 static struct gpg_format gpg_format[] = {
@@ -64,6 +72,14 @@ static struct gpg_format gpg_format[] = {
 		.sigs = x509_sigs,
 		.verify_signed_buffer = verify_gpg_signed_buffer,
 		.sign_buffer = sign_buffer_gpg,
+	},
+	{
+		.name = "ssh",
+		.program = "ssh-keygen",
+		.verify_args = ssh_verify_args,
+		.sigs = ssh_sigs,
+		.verify_signed_buffer = NULL, /* TODO */
+		.sign_buffer = sign_buffer_ssh
 	},
 };
 
@@ -443,6 +459,9 @@ int git_gpg_config(const char *var, const char *value, void *cb)
 	if (!strcmp(var, "gpg.x509.program"))
 		fmtname = "x509";
 
+	if (!strcmp(var, "gpg.ssh.program"))
+		fmtname = "ssh";
+
 	if (fmtname) {
 		fmt = get_format_by_name(fmtname);
 		return git_config_string(&fmt->program, var, value);
@@ -463,12 +482,26 @@ int sign_buffer(struct strbuf *buffer, struct strbuf *signature, const char *sig
 	return use_format->sign_buffer(buffer, signature, signing_key);
 }
 
+static void strbuf_trim_trailing_cr(struct strbuf *buffer, int offset)
+{
+	size_t i, j;
+
+	for (i = j = offset; i < buffer->len; i++) {
+		if (buffer->buf[i] != '\r') {
+			if (i != j)
+				buffer->buf[j] = buffer->buf[i];
+			j++;
+		}
+	}
+	strbuf_setlen(buffer, j);
+}
+
 static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
 		    const char *signing_key)
 {
 	struct child_process gpg = CHILD_PROCESS_INIT;
 	int ret;
-	size_t i, j, bottom;
+	size_t bottom;
 	struct strbuf gpg_status = STRBUF_INIT;
 
 	strvec_pushl(&gpg.args,
@@ -494,13 +527,101 @@ static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
 		return error(_("gpg failed to sign the data"));
 
 	/* Strip CR from the line endings, in case we are on Windows. */
-	for (i = j = bottom; i < signature->len; i++)
-		if (signature->buf[i] != '\r') {
-			if (i != j)
-				signature->buf[j] = signature->buf[i];
-			j++;
-		}
-	strbuf_setlen(signature, j);
+	strbuf_trim_trailing_cr(signature, bottom);
 
 	return 0;
+}
+
+static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
+			   const char *signing_key)
+{
+	struct child_process signer = CHILD_PROCESS_INIT;
+	int ret = -1;
+	size_t bottom;
+	struct strbuf signer_stderr = STRBUF_INIT;
+	struct tempfile *temp = NULL, *buffer_file = NULL;
+	char *ssh_signing_key_file = NULL;
+	struct strbuf ssh_signature_filename = STRBUF_INIT;
+
+	if (!signing_key || signing_key[0] == '\0')
+		return error(
+			_("user.signingkey needs to be set for ssh signing"));
+
+	if (istarts_with(signing_key, "ssh-")) {
+		/* A literal ssh key */
+		temp = mks_tempfile_t(".git_signing_key_tmpXXXXXX");
+		if (!temp)
+			return error_errno(
+				_("could not create temporary file"));
+		if (write_in_full(temp->fd, signing_key, strlen(signing_key)) <
+			    0 ||
+		    close_tempfile_gently(temp) < 0) {
+			error_errno(_("failed writing ssh signing key to '%s'"),
+				    temp->filename.buf);
+			goto out;
+		}
+		ssh_signing_key_file = temp->filename.buf;
+	} else {
+		/* We assume a file */
+		ssh_signing_key_file = expand_user_path(signing_key, 1);
+	}
+
+	buffer_file = mks_tempfile_t(".git_signing_buffer_tmpXXXXXX");
+	if (!buffer_file) {
+		error_errno(_("could not create temporary file"));
+		goto out;
+	}
+
+	if (write_in_full(buffer_file->fd, buffer->buf, buffer->len) < 0 ||
+	    close_tempfile_gently(buffer_file) < 0) {
+		error_errno(_("failed writing ssh signing key buffer to '%s'"),
+			    buffer_file->filename.buf);
+		goto out;
+	}
+
+	strvec_pushl(&signer.args, use_format->program, "-Y", "sign", "-n",
+		     "git", "-f", ssh_signing_key_file,
+		     buffer_file->filename.buf, NULL);
+
+	sigchain_push(SIGPIPE, SIG_IGN);
+	ret = pipe_command(&signer, NULL, 0, NULL, 0, &signer_stderr, 0);
+	sigchain_pop(SIGPIPE);
+
+	if (ret && strstr(signer_stderr.buf, "usage:")) {
+		error(_("ssh-keygen -Y sign is needed for ssh signing (available in openssh version 8.2p1+)"));
+		goto out;
+	}
+
+	if (ret) {
+		error("%s", signer_stderr.buf);
+		goto out;
+	}
+
+	bottom = signature->len;
+
+	strbuf_addbuf(&ssh_signature_filename, &buffer_file->filename);
+	strbuf_addstr(&ssh_signature_filename, ".sig");
+	if (strbuf_read_file(signature, ssh_signature_filename.buf, 2048) < 0) {
+		error_errno(
+			_("failed reading ssh signing data buffer from '%s'"),
+			ssh_signature_filename.buf);
+	}
+	unlink_or_warn(ssh_signature_filename.buf);
+
+	if (ret) {
+		error(_("ssh failed to sign the data"));
+		goto out;
+	}
+
+	/* Strip CR from the line endings, in case we are on Windows. */
+	strbuf_trim_trailing_cr(signature, bottom);
+
+out:
+	if (temp)
+		delete_tempfile(&temp);
+	if (buffer_file)
+		delete_tempfile(&buffer_file);
+	strbuf_release(&signer_stderr);
+	strbuf_release(&ssh_signature_filename);
+	return ret;
 }
