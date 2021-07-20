@@ -1508,7 +1508,7 @@ git_reftable_reflog_expire(struct ref_store *ref_store, const char *refname,
 	if (err) {
 		goto done;
 	}
-	prepare_fn(refname, oid, policy_cb_data);
+	prepare_fn(refname, (void *)oid, policy_cb_data);
 	while (1) {
 		struct reftable_log_record log = { NULL };
 		int err = reftable_iterator_next_log(&it, &log);
