@@ -347,7 +347,7 @@ test_expect_success 'status/add: outside sparse cone' '
 	test_all_match git commit -m folder1/newer
 '
 
-test_expect_failure 'add: pathspec within sparse directory' '
+test_expect_success 'add: pathspec within sparse directory' '
 	init_repos &&
 
 	run_on_sparse mkdir folder1 &&
@@ -357,10 +357,6 @@ test_expect_failure 'add: pathspec within sparse directory' '
 	# This "git add folder1/a" fails with a warning
 	# in the sparse repos, differing from the full
 	# repo. This is intentional.
-	#
-	# However, in the sparse-index, folder1/a does not
-	# match any cache entry and fails with a different
-	# error message. This needs work.
 	test_sparse_match test_must_fail git add folder1/a &&
 	test_sparse_match test_must_fail git add --refresh folder1/a &&
 	test_all_match git status --porcelain=v2
