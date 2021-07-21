@@ -295,7 +295,7 @@ test_expect_success '--rebase (merge) fast forward' '
 	# The above only validates the result.  Did we actually bypass rebase?
 	git reflog -1 >reflog.actual &&
 	sed "s/^[0-9a-f][0-9a-f]*/OBJID/" reflog.actual >reflog.fuzzy &&
-	echo "OBJID HEAD@{0}: pull --rebase . ff: Fast-forward" >reflog.expected &&
+	echo "OBJID HEAD@{0}: pull --rebase . ff (finish): returning to refs/heads/to-rebase" >reflog.expected &&
 	test_cmp reflog.expected reflog.fuzzy
 '
 
@@ -307,8 +307,8 @@ test_expect_success '--rebase (am) fast forward' '
 
 	# The above only validates the result.  Did we actually bypass rebase?
 	git reflog -1 >reflog.actual &&
-	sed "s/^[0-9a-f][0-9a-f]*/OBJID/" reflog.actual >reflog.fuzzy &&
-	echo "OBJID HEAD@{0}: pull --rebase . ff: Fast-forward" >reflog.expected &&
+	sed -e "s/^[0-9a-f][0-9a-f]*/OBJID/" -e "s/[0-9a-f][0-9a-f]*$/OBJID/" reflog.actual >reflog.fuzzy &&
+	echo "OBJID HEAD@{0}: rebase finished: refs/heads/to-rebase onto OBJID" >reflog.expected &&
 	test_cmp reflog.expected reflog.fuzzy
 '
 
