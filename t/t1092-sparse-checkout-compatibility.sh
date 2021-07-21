@@ -114,6 +114,16 @@ test_expect_success 'setup' '
 		git add . &&
 		git commit -m "file to dir" &&
 
+		for side in left right
+		do
+			git checkout -b merge-$side base &&
+			echo $side >>deep/deeper2/a &&
+			echo $side >>folder1/a &&
+			echo $side >>folder2/a &&
+			git add . &&
+			git commit -m "$side" || return 1
+		done &&
+
 		git checkout -b deepest base &&
 		echo "updated deepest" >deep/deeper1/deepest/a &&
 		git commit -a -m "update deepest" &&
@@ -479,6 +489,33 @@ test_expect_success 'merge' '
 	test_all_match git merge -m "folder1" update-folder1 &&
 	test_all_match git rev-parse HEAD^{tree} &&
 	test_all_match git merge -m "folder2" update-folder2 &&
+	test_all_match git rev-parse HEAD^{tree}
+'
+
+test_expect_success 'merge with conflict outside cone' '
+	init_repos &&
+
+	test_all_match git checkout -b merge-tip merge-left &&
+	test_all_match git status --porcelain=v2 &&
+	test_all_match test_must_fail git merge -m merge merge-right &&
+	test_all_match git status --porcelain=v2 &&
+
+	# resolve the conflict in different ways:
+	# 1. revert to the base
+	test_all_match git checkout base -- deep/deeper2/a &&
+	test_all_match git status --porcelain=v2 &&
+
+	# 2. add the file with conflict markers
+	test_all_match git add folder1/a &&
+	test_all_match git status --porcelain=v2 &&
+
+	# 3. rename the file to another sparse filename
+	run_on_all mv folder2/a folder2/z &&
+	test_all_match git add folder2 &&
+	test_all_match git status --porcelain=v2 &&
+
+	test_all_match git merge --continue &&
+	test_all_match git status --porcelain=v2 &&
 	test_all_match git rev-parse HEAD^{tree}
 '
 
